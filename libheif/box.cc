@@ -40,6 +40,23 @@ heif::Error heif::Error::Ok(heif_error_Ok);
 
 
 
+Fraction::Fraction(int32_t num,int32_t den)
+{
+  // Reduce resolution of fraction until we are in a safe range.
+  // We need this as adding fractions may lead to very large denominators
+  // (e.g. 0x10000 * 0x10000 > 0x100000000 -> overflow, leading to integer 0)
+
+  while (denominator > MAX_FRACTION_VALUE || denominator < -MAX_FRACTION_VALUE) {
+    numerator /= 2;
+    denominator /= 2;
+  }
+
+  while (numerator > MAX_FRACTION_VALUE || numerator < -MAX_FRACTION_VALUE) {
+    numerator /= 2;
+    denominator /= 2;
+  }
+}
+
 Fraction Fraction::operator+(const Fraction& b) const
 {
   if (denominator == b.denominator) {
@@ -87,6 +104,10 @@ int Fraction::round() const
   return (numerator + denominator/2)/denominator;
 }
 
+bool Fraction::is_valid() const
+{
+  return denominator != 0;
+}
 
 uint32_t from_fourcc(const char* string)
 {
@@ -1047,6 +1068,14 @@ Error Box_iloc::read_data(const Item& item,
 
 
       // --- make sure that all data is available
+
+      if (extent.offset > MAX_FILE_POS ||
+          item.base_offset > MAX_FILE_POS ||
+          extent.length > MAX_FILE_POS) {
+        return Error(heif_error_Invalid_input,
+                     heif_suberror_Security_limit_exceeded,
+                     "iloc data pointers out of allowed range");
+      }
 
       StreamReader::grow_status status = istr->wait_for_file_size(extent.offset + item.base_offset + extent.length);
       if (status == StreamReader::size_beyond_eof) {
@@ -2140,6 +2169,11 @@ Error Box_clap::parse(BitstreamRange& range)
   m_horizontal_offset.denominator = range.read32();
   m_vertical_offset.numerator   = range.read32();
   m_vertical_offset.denominator = range.read32();
+  if (!m_clean_aperture_width.is_valid() || !m_clean_aperture_height.is_valid() ||
+      !m_horizontal_offset.is_valid() || !m_vertical_offset.is_valid()) {
+    return Error(heif_error_Invalid_input,
+                 heif_suberror_Invalid_fractional_number);
+  }
 
   return range.get_error();
 }
@@ -2687,6 +2721,13 @@ Error Box_idat::read_data(std::shared_ptr<StreamReader> istr,
 
 
   // move to start of data
+  if (start > (uint64_t)m_data_start_pos + get_box_size()) {
+    return Error(heif_error_Invalid_input,
+                 heif_suberror_End_of_data);
+  } else if (length > get_box_size() || start + length > get_box_size()) {
+    return Error(heif_error_Invalid_input,
+                 heif_suberror_End_of_data);
+  }
 
   StreamReader::grow_status status = istr->wait_for_file_size((int64_t)m_data_start_pos + start + length);
   if (status == StreamReader::size_beyond_eof ||
